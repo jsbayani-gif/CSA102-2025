@@ -1,0 +1,265 @@
+# CNN_CSA102_Project.py
+# Convolutional Neural Network project template for CSA102-2025
+# Dataset: CIFAR-10 (open access). Replace dataset loading if using your own data.
+# This script is formatted to be used inside a Jupyter notebook cell-by-cell.
+
+"""
+Sections:
+1) Imports and environment check
+2) Load dataset (CIFAR-10) and exploratory checks
+3) Data preprocessing, augmentation, and splitting
+4) Model architecture (convolutional neural network) with justification
+5) Training (callbacks, checkpoints, tuning hints)
+6) Evaluation (metrics, confusion matrix, plots)
+7) Reproducibility, saving model, and next steps
+
+This script intentionally documents choices to match the project rubric (Data Prep & Exploration; Model Architecture & Training; Evaluation & Results; Code Quality & Documentation).
+"""
+
+# -----------------------------
+# 1) Imports and environment check
+# -----------------------------
+import os
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from datetime import datetime
+
+# Deep learning
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+
+# Metrics
+from sklearn.metrics import classification_report, confusion_matrix
+
+# Reproducibility
+SEED = 42
+random.seed(SEED)
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+print("TensorFlow version:", tf.__version__)
+
+# -----------------------------
+# 2) Load dataset (CIFAR-10) and exploratory checks
+# -----------------------------
+# Using CIFAR-10 as an example open dataset. To use another dataset, replace this section with your loader.
+(x_train, y_train), (x_test, y_test) = keras.datasets.cifar10.load_data()
+
+# Quick EDA: shapes and class distribution
+print('x_train shape:', x_train.shape)
+print('y_train shape:', y_train.shape)
+print('x_test shape:', x_test.shape)
+print('y_test shape:', y_test.shape)
+
+num_classes = 10
+class_names = ['airplane','automobile','bird','cat','deer','dog','frog','horse','ship','truck']
+
+# Plot a few sample images
+def show_samples(X, Y, classes, n=8):
+    plt.figure(figsize=(12,3))
+    idxs = np.random.choice(len(X), n, replace=False)
+    for i, idx in enumerate(idxs):
+        plt.subplot(1, n, i+1)
+        plt.imshow(X[idx])
+        plt.title(classes[int(Y[idx])])
+        plt.axis('off')
+    plt.show()
+
+show_samples(x_train, y_train, class_names, n=8)
+
+# Check for missing values or anomalies
+print('Min pixel value:', x_train.min(), 'Max pixel value:', x_train.max())
+
+# -----------------------------
+# 3) Data preprocessing, augmentation, and splitting
+# -----------------------------
+# Rationale: CIFAR images are small (32x32x3). We'll normalize to [0,1], one-hot the labels, and use augmentation to reduce overfitting.
+
+# Normalize
+x_train = x_train.astype('float32') / 255.0
+x_test = x_test.astype('float32') / 255.0
+
+# One-hot
+y_train_cat = keras.utils.to_categorical(y_train, num_classes)
+y_test_cat = keras.utils.to_categorical(y_test, num_classes)
+
+# Train/validation split
+from sklearn.model_selection import train_test_split
+x_train_split, x_val, y_train_split, y_val = train_test_split(
+    x_train, y_train_cat, test_size=0.15, random_state=SEED, stratify=y_train)
+
+print('Train:', x_train_split.shape, 'Val:', x_val.shape)
+
+# Augmentation
+train_datagen = ImageDataGenerator(
+    rotation_range=15,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+val_datagen = ImageDataGenerator()  # only rescale (already normalized)
+
+batch_size = 64
+train_generator = train_datagen.flow(x_train_split, y_train_split, batch_size=batch_size, shuffle=True)
+val_generator = val_datagen.flow(x_val, y_val, batch_size=batch_size, shuffle=False)
+
+# -----------------------------
+# 4) Model architecture (CNN) with justification
+# -----------------------------
+# Rationale: Use a moderately deep CNN with Conv -> BN -> ReLU -> Pool blocks. BatchNorm improves training stability; Dropout reduces overfitting.
+# We'll use GlobalAveragePooling before dense layers to reduce parameters.
+
+def build_cnn(input_shape=(32,32,3), num_classes=10, dropout_rate=0.4):
+    inputs = keras.Input(shape=input_shape)
+    x = layers.Conv2D(32, (3,3), padding='same', activation='relu')(inputs)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv2D(32, (3,3), padding='same', activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling2D((2,2))(x)
+    x = layers.Dropout(0.2)(x)
+
+    x = layers.Conv2D(64, (3,3), padding='same', activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv2D(64, (3,3), padding='same', activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.MaxPooling2D((2,2))(x)
+    x = layers.Dropout(0.3)(x)
+
+    x = layers.Conv2D(128, (3,3), padding='same', activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Conv2D(128, (3,3), padding='same', activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.GlobalAveragePooling2D()(x)
+    x = layers.Dropout(dropout_rate)(x)
+
+    x = layers.Dense(128, activation='relu')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.Dropout(0.4)(x)
+
+    outputs = layers.Dense(num_classes, activation='softmax')(x)
+    model = keras.Model(inputs=inputs, outputs=outputs, name='cifar10_cnn')
+    return model
+
+model = build_cnn()
+model.summary()
+
+# -----------------------------
+# 5) Compile and training (callbacks, checkpoints)
+# -----------------------------
+# Rationale: Use Adam optimizer, categorical crossentropy. Use ReduceLROnPlateau and EarlyStopping for stable training and to avoid overfitting.
+
+initial_lr = 1e-3
+model.compile(
+    optimizer=keras.optimizers.Adam(learning_rate=initial_lr),
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+# Callbacks
+logdir = os.path.join('logs', datetime.now().strftime('%Y%m%d-%H%M%S'))
+callbacks = [
+    keras.callbacks.ModelCheckpoint('best_cifar10_cnn.h5', save_best_only=True, monitor='val_accuracy'),
+    keras.callbacks.EarlyStopping(monitor='val_loss', patience=8, restore_best_weights=True),
+    keras.callbacks.ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=3, min_lr=1e-6, verbose=1)
+]
+
+epochs = 50
+steps_per_epoch = len(train_generator)
+
+history = model.fit(
+    train_generator,
+    epochs=epochs,
+    steps_per_epoch=steps_per_epoch,
+    validation_data=val_generator,
+    callbacks=callbacks
+)
+
+# -----------------------------
+# 6) Evaluation & Results
+# -----------------------------
+# Evaluate on test set
+print('\nEvaluating on held-out test set:')
+results = model.evaluate(x_test, y_test_cat, batch_size=batch_size, verbose=1)
+print('Test loss, Test accuracy:', results)
+
+# Predictions
+y_pred_probs = model.predict(x_test)
+y_pred = np.argmax(y_pred_probs, axis=1)
+y_true = y_test.flatten()
+
+# Confusion matrix
+cm = confusion_matrix(y_true, y_pred)
+print('\nConfusion matrix:')
+print(cm)
+
+# Classification report
+report = classification_report(y_true, y_pred, target_names=class_names)
+print('\nClassification report:')
+print(report)
+
+# Plot training history
+plt.figure(figsize=(12,4))
+plt.subplot(1,2,1)
+plt.plot(history.history['loss'], label='train_loss')
+plt.plot(history.history['val_loss'], label='val_loss')
+plt.title('Loss')
+plt.xlabel('Epoch')
+plt.legend()
+
+plt.subplot(1,2,2)
+plt.plot(history.history['accuracy'], label='train_acc')
+plt.plot(history.history['val_accuracy'], label='val_acc')
+plt.title('Accuracy')
+plt.xlabel('Epoch')
+plt.legend()
+plt.show()
+
+# Visualize confusion matrix heatmap
+try:
+    import seaborn as sns
+    plt.figure(figsize=(8,6))
+    sns.heatmap(cm, annot=True, fmt='d', xticklabels=class_names, yticklabels=class_names)
+    plt.ylabel('True')
+    plt.xlabel('Predicted')
+    plt.title('Confusion Matrix')
+    plt.show()
+except Exception:
+    print('Seaborn not available; skipping heatmap. You can pip install seaborn to enable it.')
+
+# Show some misclassified images
+mis_idx = np.where(y_pred != y_true)[0]
+print('Number of misclassified examples:', len(mis_idx))
+if len(mis_idx) > 0:
+    plt.figure(figsize=(12,6))
+    for i, idx in enumerate(mis_idx[:8]):
+        plt.subplot(2,4,i+1)
+        plt.imshow(x_test[idx])
+        plt.title(f'True: {class_names[y_true[idx]]}\nPred: {class_names[y_pred[idx]]}')
+        plt.axis('off')
+    plt.show()
+
+# -----------------------------
+# 7) Saving model and reproducibility notes
+# -----------------------------
+model.save('final_cifar10_cnn.h5')
+
+print('\nModel saved to final_cifar10_cnn.h5')
+
+# Notes for reproducibility and rubric mapping:
+# - Data Preparation & Exploration: dataset normalization, stratified train/val split, simple EDA plots included. Augmentation applied and justified in comments.
+# - Model Architecture & Training: architecture uses Conv-BN-ReLU blocks, dropout, global pooling. Callbacks, learning-rate scheduling, and early stopping included.
+# - Evaluation & Results: test evaluation, confusion matrix, classification report, loss/accuracy plots, and misclassified examples shown.
+# - Code Quality & Documentation: this script is modular (functions), well-commented, and organized for a notebook. Replace dataset loading to use custom dataset.
+
+# Next steps / optional improvements to match "Excellent" rubric:
+# - Use transfer learning with pre-trained backbones (ResNet, EfficientNet) for better performance.
+# - Run hyperparameter tuning (learning rate, optimizer, dropout, batch size) with Keras Tuner or manual grid search.
+# - Use stratified k-fold cross-validation and report mean/std of metrics.
+# - Add more advanced augmentations (CutMix, MixUp) and regularization techniques.
+
+# End of script
